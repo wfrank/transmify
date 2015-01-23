@@ -1,0 +1,114 @@
+#!/usr/bin/env python
+
+import json
+import asyncio
+import aiohttp
+from math import ceil
+
+
+connector = aiohttp.TCPConnector(verify_ssl=False)
+
+
+@asyncio.coroutine
+def query_first_piece(**kwargs):
+    while True:
+        try:
+            print("making query for the first piece")
+            response = yield from asyncio.wait_for(
+                aiohttp.request('get', "https://yts.re/api/list.json", params=kwargs, connector=connector), 5)
+            if response.status == 200 and response.headers['Content-Type'] == "application/json":
+                result = yield from response.json()
+                print("first query completed, found {} movies".format(result[u'MovieCount']))
+                return result[u'MovieCount'], result[u'MovieList']
+            else:
+                print("got an unexpected response, retrying...")
+        except asyncio.TimeoutError:
+            print("retrying the first query after timeout")
+
+
+@asyncio.coroutine
+def query_subsequent_piece(**kwargs):
+    piece = kwargs["set"]
+    print("making query for piece: {}".format(piece))
+
+    response = yield from aiohttp.request('get', 'https://yts.re/api/list.json',
+                                          params=kwargs, connector=connector)
+    if response.headers['Content-Type'] != "application/json":
+        print("query for piece #{} got an unexpected response".format(piece))
+        return piece, None
+    result = yield from response.json()
+    subsequent_movie_list = result['MovieList']
+    print("query for piece #{} completed".format(piece))
+
+    return piece, subsequent_movie_list
+
+
+@asyncio.coroutine
+def query_remaining_pieces(pieces, **kwargs):
+    results = []
+
+    while pieces:
+        print("{} subsequent queries to go".format(len(pieces)))
+        queries = []
+        for piece in pieces:
+            kwargs['set'] = piece
+            queries.append(query_subsequent_piece(**kwargs))
+        queries_done, queries_pending = yield from asyncio.wait(queries, timeout=15)
+        for query in queries_done:
+            piece, subsequent_movie_list = query.result()
+            if subsequent_movie_list is not None:
+                pieces.remove(piece)
+                results.append((piece, subsequent_movie_list))
+        for query in queries_pending:
+            query.cancel()
+
+    return results
+
+
+@asyncio.coroutine
+def fetch(**kwargs):
+    if "set" in kwargs:
+        del kwargs["set"]
+
+    movie_count, movie_list = yield from query_first_piece(**kwargs)
+    print("{} movies online".format(movie_count))
+    pieces = set(range(2, ceil(movie_count / 50) + 1))
+    print("{} subsequent queries to go".format(len(pieces)))
+    results = yield from query_remaining_pieces(pieces, **kwargs)
+    for piece, subsequent_movie_list in sorted(results):
+        print("gathering piece {}".format(piece))
+        movie_list.extend(subsequent_movie_list)
+
+    with open('movies.json', 'w') as db:
+        print("saving {} movies to local database".format(len(movie_list)))
+        json.dump(movie_list, db, sort_keys=True, indent=4)
+
+
+@asyncio.coroutine
+def update(**kwargs):
+    if "set" in kwargs:
+        del kwargs["set"]
+
+    with open('movies.json', 'r') as db:
+        movie_list = json.load(db)
+        movie_count = len(movie_list)
+    print("{} movies in local database".format(movie_count))
+
+    current_movie_count, current_movie_list = yield from query_first_piece(**kwargs)
+    print("{} movies online".format(current_movie_count))
+    pieces = set(range(2, ceil((current_movie_count - movie_count) / 50) + 1))
+    result = yield from query_remaining_pieces(pieces, **kwargs)
+    for piece, subsequent_movie_list in sorted(result):
+        current_movie_list.extend(subsequent_movie_list)
+
+    current_movie_list[current_movie_count - movie_count:] = movie_list
+
+    with open('movies.json', 'w') as db:
+        print("saving {} movies to local database".format(len(current_movie_list)))
+        json.dump(current_movie_list, db, sort_keys=True, indent=4)
+
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(update(limit=50, quality='1080p', rating=0))
+
