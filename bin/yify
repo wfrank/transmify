@@ -2,58 +2,59 @@
 
 import json
 import asyncio
-import aiohttp
+from os import path
 from math import ceil
+from argparse import ArgumentParser
+
+import aiohttp
 
 
 connector = aiohttp.TCPConnector(verify_ssl=False)
 
 
 @asyncio.coroutine
-def query_first_piece(**kwargs):
+def query_first_piece(options, parameters):
     while True:
         try:
             print("making query for the first piece")
             response = yield from asyncio.wait_for(
-                aiohttp.request('get', "https://yts.re/api/list.json", params=kwargs, connector=connector), 5)
+                aiohttp.request('get', "https://yts.re/api/list.json",
+                                params=parameters, connector=connector), options.timeout)
             if response.status == 200 and response.headers['Content-Type'] == "application/json":
                 result = yield from response.json()
                 print("first query completed, found {} movies".format(result[u'MovieCount']))
                 return result[u'MovieCount'], result[u'MovieList']
             else:
-                print("got an unexpected response, retrying...")
+                print("first query got an unexpected response, retrying...")
         except asyncio.TimeoutError:
             print("retrying the first query after timeout")
 
 
 @asyncio.coroutine
-def query_subsequent_piece(**kwargs):
-    piece = kwargs["set"]
+def query_subsequent_piece(options, parameters):
+    piece = parameters["set"]
     print("making query for piece: {}".format(piece))
-
     response = yield from aiohttp.request('get', 'https://yts.re/api/list.json',
-                                          params=kwargs, connector=connector)
+                                          params=parameters, connector=connector)
     if response.headers['Content-Type'] != "application/json":
         print("query for piece #{} got an unexpected response".format(piece))
         return piece, None
     result = yield from response.json()
     subsequent_movie_list = result['MovieList']
     print("query for piece #{} completed".format(piece))
-
     return piece, subsequent_movie_list
 
 
 @asyncio.coroutine
-def query_remaining_pieces(pieces, **kwargs):
+def query_remaining_pieces(pieces, options, parameters):
     results = []
-
     while pieces:
         print("{} subsequent queries to go".format(len(pieces)))
         queries = []
         for piece in pieces:
-            kwargs['set'] = piece
-            queries.append(query_subsequent_piece(**kwargs))
-        queries_done, queries_pending = yield from asyncio.wait(queries, timeout=15)
+            parameters['set'] = piece
+            queries.append(query_subsequent_piece(options, parameters))
+        queries_done, queries_pending = yield from asyncio.wait(queries, timeout=options.timeout)
         for query in queries_done:
             piece, subsequent_movie_list = query.result()
             if subsequent_movie_list is not None:
@@ -61,54 +62,84 @@ def query_remaining_pieces(pieces, **kwargs):
                 results.append((piece, subsequent_movie_list))
         for query in queries_pending:
             query.cancel()
-
     return results
 
 
 @asyncio.coroutine
-def fetch(**kwargs):
-    if "set" in kwargs:
-        del kwargs["set"]
-
-    movie_count, movie_list = yield from query_first_piece(**kwargs)
+def fetch(options, parameters):
+    movie_count, movie_list = yield from query_first_piece(options, parameters)
     print("{} movies online".format(movie_count))
     pieces = set(range(2, ceil(movie_count / 50) + 1))
     print("{} subsequent queries to go".format(len(pieces)))
-    results = yield from query_remaining_pieces(pieces, **kwargs)
+    results = yield from query_remaining_pieces(pieces, options, parameters)
     for piece, subsequent_movie_list in sorted(results):
         print("gathering piece {}".format(piece))
         movie_list.extend(subsequent_movie_list)
 
-    with open('movies.json', 'w') as db:
+    with open(options.database, 'w') as db:
         print("saving {} movies to local database".format(len(movie_list)))
         json.dump(movie_list, db, sort_keys=True, indent=4)
 
 
 @asyncio.coroutine
-def update(**kwargs):
-    if "set" in kwargs:
-        del kwargs["set"]
+def update(options, parameters):
+    try:
+        with open(options.database, 'r') as db:
+            movie_list = json.load(db)
+            movie_count = len(movie_list)
+    except FileNotFoundError:
+        print("local database not found, performing fetch instead of update")
+        return (yield from fetch(**parameters))
 
-    with open('movies.json', 'r') as db:
-        movie_list = json.load(db)
-        movie_count = len(movie_list)
     print("{} movies in local database".format(movie_count))
-
-    current_movie_count, current_movie_list = yield from query_first_piece(**kwargs)
+    current_movie_count, current_movie_list = yield from query_first_piece(parameters)
     print("{} movies online".format(current_movie_count))
     pieces = set(range(2, ceil((current_movie_count - movie_count) / 50) + 1))
-    result = yield from query_remaining_pieces(pieces, **kwargs)
+    result = yield from query_remaining_pieces(pieces, parameters)
     for piece, subsequent_movie_list in sorted(result):
         current_movie_list.extend(subsequent_movie_list)
-
     current_movie_list[current_movie_count - movie_count:] = movie_list
 
-    with open('movies.json', 'w') as db:
+    with open(options.database, 'w') as db:
         print("saving {} movies to local database".format(len(current_movie_list)))
         json.dump(current_movie_list, db, sort_keys=True, indent=4)
 
 
-if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(update(limit=50, quality='1080p', rating=0))
+def main():
+    parser = ArgumentParser()
+    parser.add_argument("-q", "--quality", choices=["720p", "1080p", "3D"], default="1080p",
+                        help="Ability to select a quality type to filter by")
+    parser.add_argument("-r", "--rating", type=int, choices=range(0, 10), help="Sets minimum movie rating for display")
+    parser.add_argument("-g", "--genre",
+                        help="Display movies from chosen type genre. See http://www.imdb.com/genre/ for full list")
+    parser.add_argument("-k", "--keywords",
+                        help="Matching keywords title search, "
+                             "IMDB code, Actor Name/IMDB code or Director Name/IMDB code")
 
+    parameters, remaining_argv = parser.parse_known_args()
+    parameters = vars(parameters)
+    parameters = {k: v for k, v in parameters.items() if v}
+    parameters["limit"] = 50
+
+    parser = ArgumentParser()
+    parser.add_argument("action", choices=["fetch", "update"],
+                        help="fetch a fresh copy of the movie database of do a incremental update")
+    parser.add_argument("-t", "--timeout", type=int, default=10, help="timeout for each single query in seconds")
+    parser.add_argument("-d", "--database", help="explicit name of the database")
+    options = parser.parse_args(remaining_argv)
+
+    database = options.database or "-".join(str(parameters[k])
+                                            for k in ["quality", "rating", "genre", "keywords"] if k in parameters)
+    database = path.join(path.dirname(__file__), "../var/db", "movies_{}.json".format(database))
+    options.database = database
+    if options.action == "update":
+        action = update(options, parameters)
+    else:
+        action = fetch(options, parameters)
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(action)
+
+
+if __name__ == "__main__":
+    main()
