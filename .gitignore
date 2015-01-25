@@ -1,3 +1,3 @@
 .idea
 venv
-var/db/*
+movies_*.json

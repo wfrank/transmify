@@ -52,6 +52,7 @@ def query_remaining_pieces(pieces, options, parameters):
         print("{} subsequent queries to go".format(len(pieces)))
         queries = []
         for piece in pieces:
+            parameters = parameters.copy()
             parameters['set'] = piece
             queries.append(query_subsequent_piece(options, parameters))
         queries_done, queries_pending = yield from asyncio.wait(queries, timeout=options.timeout)
