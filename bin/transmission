@@ -120,7 +120,7 @@ def main():
 
     with open(database, 'r') as db:
         current_movie_list = json.load(db)
-        wanted_movies = (movie for movie in current_movie_list if float(movie['MovieRating']) > 6.0)
+        wanted_movies = (movie for movie in current_movie_list if float(movie['MovieRating']) >= 6.0)
         for movie in wanted_movies:
             if movie['TorrentHash'] not in session_movie_list:
                 result = yield from transmission.torrent_add(movie['TorrentUrl'])

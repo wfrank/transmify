@@ -93,10 +93,10 @@ def update(options, parameters):
         return (yield from fetch(**parameters))
 
     print("{} movies in local database".format(movie_count))
-    current_movie_count, current_movie_list = yield from query_first_piece(parameters)
+    current_movie_count, current_movie_list = yield from query_first_piece(options, parameters)
     print("{} movies online".format(current_movie_count))
     pieces = set(range(2, ceil((current_movie_count - movie_count) / 50) + 1))
-    result = yield from query_remaining_pieces(pieces, parameters)
+    result = yield from query_remaining_pieces(pieces, options, parameters)
     for piece, subsequent_movie_list in sorted(result):
         current_movie_list.extend(subsequent_movie_list)
     current_movie_list[current_movie_count - movie_count:] = movie_list
