@@ -5,6 +5,7 @@ import asyncio
 from os import path
 from math import ceil
 from argparse import ArgumentParser
+from pprint import pprint
 
 import aiohttp
 
@@ -107,39 +108,41 @@ def update(options, parameters):
 
 
 def main():
-    parser = ArgumentParser()
-    parser.add_argument("-q", "--quality", choices=["720p", "1080p", "3D"], default="1080p",
-                        help="Ability to select a quality type to filter by")
-    parser.add_argument("-r", "--rating", type=int, choices=range(0, 10), help="Sets minimum movie rating for display")
-    parser.add_argument("-g", "--genre",
-                        help="Display movies from chosen type genre. See http://www.imdb.com/genre/ for full list")
-    parser.add_argument("-k", "--keywords",
-                        help="Matching keywords title search, "
-                             "IMDB code, Actor Name/IMDB code or Director Name/IMDB code")
 
-    parameters, remaining_argv = parser.parse_known_args()
-    parameters = vars(parameters)
-    parameters = {k: v for k, v in parameters.items() if v}
-    parameters["limit"] = 50
+    main_parser = ArgumentParser()
+    main_parser.add_argument("-t", "--timeout", type=int, default=10, help="timeout for each single query in seconds")
+    main_parser.add_argument("-d", "--database", help="explicit name of the database")
 
-    parser = ArgumentParser()
-    parser.add_argument("action", choices=["fetch", "update"],
-                        help="fetch a fresh copy of the movie database of do a incremental update")
-    parser.add_argument("-t", "--timeout", type=int, default=10, help="timeout for each single query in seconds")
-    parser.add_argument("-d", "--database", help="explicit name of the database")
-    options = parser.parse_args(remaining_argv)
+    subparsers = main_parser.add_subparsers(title="supported actions")
+    subparsers.required = True
+    subparsers.dest = "command"
+    fetch_parser = subparsers.add_parser('fetch', help="fetch a whole copy of the movie database")
+    fetch_parser.set_defaults(action=fetch)
+    update_parser = subparsers.add_parser('update', help="incremental update an existing movie database")
+    update_parser.set_defaults(action=update)
 
-    database = options.database or "-".join(str(parameters[k])
-                                            for k in ["quality", "rating", "genre", "keywords"] if k in parameters)
+    for parser in (fetch_parser, update_parser):
+        parser.add_argument("-q", "--quality", choices=["720p", "1080p", "3D"], default="1080p",
+                                 help="Ability to select a quality type to filter by")
+        parser.add_argument("-r", "--rating", type=int, choices=range(0, 10), help="Sets minimum movie rating for display")
+        parser.add_argument("-g", "--genre",
+                            help="Display movies from chosen type genre. See http://www.imdb.com/genre/ for full list")
+        parser.add_argument("-k", "--keywords",
+                            help="Matching keywords title search, "
+                                 "IMDB code, Actor Name/IMDB code or Director Name/IMDB code")
+
+    options = main_parser.parse_args()
+
+    query_parameters = {k: v for k, v in vars(options).items() if v}
+    query_parameters["limit"] = 50
+
+    argument_names = ["quality", "rating", "genre", "keywords"]
+    database = options.database or "-".join(str(query_parameters[k]) for k in argument_names if k in query_parameters)
     database = path.join(path.dirname(__file__), "../var/db", "movies_{}.json".format(database))
     options.database = database
-    if options.action == "update":
-        action = update(options, parameters)
-    else:
-        action = fetch(options, parameters)
 
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(action)
+    loop.run_until_complete(options.action(options, query_parameters))
 
 
 if __name__ == "__main__":
